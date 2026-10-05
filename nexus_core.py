@@ -35,74 +35,99 @@ if not os.getenv("GROQ_API_KEY"):
 
 @tool
 def analyze_document(file_path: str, instruction: str = "Extract key business metrics, financial obligations, and critical terms.") -> str:
-    """Extracts and analyzes text from local PDF, TXT, or CSV documents.
+    """Extracts text content from local PDF, TXT, CSV, or Markdown documents for analysis.
     Args:
         file_path: Absolute or relative local path to the document.
-        instruction: What specific intelligence to look for.
+        instruction: Specific intelligence or data points to look for in the extracted text.
     """
     if not os.path.exists(file_path):
         return f"Operational Error: Document not found at path '{file_path}'."
-    
+
+    ext = os.path.splitext(file_path)[1].lower()
+    supported_extensions = [".pdf", ".txt", ".csv", ".md", ".json"]
+    if ext not in supported_extensions:
+        return f"Operational Error: Unsupported document format '{ext}'. Supported formats: {', '.join(supported_extensions)}."
+
     text_content = ""
     try:
-        if file_path.lower().endswith(".pdf"):
+        if ext == ".pdf":
             from pypdf import PdfReader
             reader = PdfReader(file_path)
-            for page in reader.pages[:10]: # Read up to first 10 pages to preserve bandwidth
+            # Read up to first 10 pages; break early if buffer is full
+            for page in reader.pages[:10]:
                 extracted = page.extract_text()
                 if extracted:
                     text_content += extracted + "\n"
+                if len(text_content) >= 12000:
+                    break
+        elif ext == ".csv":
+            import csv
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                reader = csv.reader(f)
+                rows = [", ".join(row) for row in reader]
+                text_content = "\n".join(rows[:150])  # Cap at first 150 rows
         else:
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                text_content = f.read()[:8000] # First 8k chars
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                text_content = f.read(12000)
 
-        if not text_content.strip():
-            return "Document parsed, but no readable text layer was found."
+        cleaned_text = text_content.strip()
+        if not cleaned_text:
+            return f"Document '{file_path}' was parsed, but contains no readable text layer."
 
-        return f"DOCUMENT EXCERPT ({file_path}):\n{text_content[:4000]}\n[Directives for analysis: {instruction}]"
+        # Keep context within ~1,500 tokens (6,000 characters) to avoid Groq TPM spikes
+        return (
+            f"DOCUMENT TELEMETRY ({file_path}):\n"
+            f"{cleaned_text[:6000]}\n\n"
+            f"[Focus Directives: {instruction}]"
+        )
     except Exception as e:
-        return f"Document extraction failure: {e}"
-
+        return f"Document extraction failure on '{file_path}': {e}"
 
 @tool
-def analyze_visual_media(file_path: str, query: str = "Analyze this visual asset for business intelligence, text/OCR, or defects.") -> str:
-    """Analyzes images (PNG, JPG) or video/audio clips using the multimodal engine.
+def analyze_visual_media(file_path: str, query: str = "Analyze this visual asset for business intelligence, text/OCR, or operational insights.") -> str:
+    """Analyzes images (PNG, JPG) or video/audio clips using the multimodal intelligence engine.
     Args:
         file_path: Path to the media file on disk.
         query: Specific questions or strategic breakdown requested.
     """
     gemini_key = os.getenv("GEMINI_API_KEY")
     if not gemini_key:
-        return "Visual Sub-Agent Offline: GEMINI_API_KEY is not set in the environment."
+        return "Visual Sub-Agent Offline: GEMINI_API_KEY is not configured in environment."
 
     if not os.path.exists(file_path):
         return f"Operational Error: Media file not found at path '{file_path}'."
 
     try:
-        from google import genai
-        client = genai.Client(api_key=gemini_key)
-        
-        # Upload file through Google File API (supports photos, audio, and videos up to 2GB)
-        uploaded_file = client.files.upload(file=file_path)
-        
-        # Poll if video is processing
         import time
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(api_key=gemini_key)
+
+        # Upload through Google File API (supports photos, audio, video up to 2GB)
+        uploaded_file = client.files.upload(file=file_path)
+
+        # Poll state if video requires processing
         while uploaded_file.state.name == "PROCESSING":
             time.sleep(2)
             uploaded_file = client.files.get(name=uploaded_file.name)
 
         prompt = (
             f"You are a visual intelligence worker for an elite Chief of Staff. "
-            f"Analyze this media file with ruthless precision. Query: {query}"
+            f"Analyze this media asset with ruthless precision. Query: {query}"
         )
+
+        # Explicitly configure generation to eliminate Automatic Function Calling (AFC) warnings
         response = client.models.generate_content(
             model="gemini-2.5-flash",
-            contents=[uploaded_file, prompt]
+            contents=[uploaded_file, prompt],
+            config=types.GenerateContentConfig(
+                temperature=0.1
+            )
         )
         return f"VISUAL TELEMETRY ({file_path}):\n{response.text}"
     except Exception as e:
         return f"Visual Sub-Agent failed: {e}"
-
 
 @tool
 def web_search(query: str) -> str:
