@@ -14,36 +14,105 @@ from langgraph.graph.message import add_messages
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.prebuilt import ToolNode, tools_condition
 
-# --- 1. TELEMETRY & ENVIRONMENT SETUP ---
+# --- 1. TELEMETRY & LOGGING ---
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 logger = logging.getLogger("NexusCore")
-
-# Silence all noisy background network loggers during tool execution
-for logger_name in ["httpx", "httpcore", "primp", "groq", "openai"]:
-    logging.getLogger(logger_name).setLevel(logging.WARNING)
+for noisy in ["httpx", "httpcore", "primp", "groq", "openai", "google"]:
+    logging.getLogger(noisy).setLevel(logging.WARNING)
 
 load_dotenv()
 
 if not os.getenv("GROQ_API_KEY"):
-    logger.error("CRITICAL: GROQ_API_KEY is missing from the environment. Initialization aborted.")
+    logger.error("CRITICAL: GROQ_API_KEY missing from environment. Aborting.")
     sys.exit(1)
 
 
-# --- 2. AGENT TOOLS (OPERATIONAL CAPABILITIES) ---
+# --- 2. MULTIMODAL & AGENT TOOLS ---
+
+@tool
+def analyze_document(file_path: str, instruction: str = "Extract key business metrics, financial obligations, and critical terms.") -> str:
+    """Extracts and analyzes text from local PDF, TXT, or CSV documents.
+    Args:
+        file_path: Absolute or relative local path to the document.
+        instruction: What specific intelligence to look for.
+    """
+    if not os.path.exists(file_path):
+        return f"Operational Error: Document not found at path '{file_path}'."
+    
+    text_content = ""
+    try:
+        if file_path.lower().endswith(".pdf"):
+            from pypdf import PdfReader
+            reader = PdfReader(file_path)
+            for page in reader.pages[:10]: # Read up to first 10 pages to preserve bandwidth
+                extracted = page.extract_text()
+                if extracted:
+                    text_content += extracted + "\n"
+        else:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                text_content = f.read()[:8000] # First 8k chars
+
+        if not text_content.strip():
+            return "Document parsed, but no readable text layer was found."
+
+        return f"DOCUMENT EXCERPT ({file_path}):\n{text_content[:4000]}\n[Directives for analysis: {instruction}]"
+    except Exception as e:
+        return f"Document extraction failure: {e}"
+
+
+@tool
+def analyze_visual_media(file_path: str, query: str = "Analyze this visual asset for business intelligence, text/OCR, or defects.") -> str:
+    """Analyzes images (PNG, JPG) or video/audio clips using the multimodal engine.
+    Args:
+        file_path: Path to the media file on disk.
+        query: Specific questions or strategic breakdown requested.
+    """
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    if not gemini_key:
+        return "Visual Sub-Agent Offline: GEMINI_API_KEY is not set in the environment."
+
+    if not os.path.exists(file_path):
+        return f"Operational Error: Media file not found at path '{file_path}'."
+
+    try:
+        from google import genai
+        client = genai.Client(api_key=gemini_key)
+        
+        # Upload file through Google File API (supports photos, audio, and videos up to 2GB)
+        uploaded_file = client.files.upload(file=file_path)
+        
+        # Poll if video is processing
+        import time
+        while uploaded_file.state.name == "PROCESSING":
+            time.sleep(2)
+            uploaded_file = client.files.get(name=uploaded_file.name)
+
+        prompt = (
+            f"You are a visual intelligence worker for an elite Chief of Staff. "
+            f"Analyze this media file with ruthless precision. Query: {query}"
+        )
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[uploaded_file, prompt]
+        )
+        return f"VISUAL TELEMETRY ({file_path}):\n{response.text}"
+    except Exception as e:
+        return f"Visual Sub-Agent failed: {e}"
+
+
 @tool
 def web_search(query: str) -> str:
-    """Search the live web for technical documentation, market data, and references."""
+    """Search the live web for technical documentation, market data, and competitor rates."""
     try:
         from ddgs import DDGS
         with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=4))
+            results = list(ddgs.text(query, max_results=3))
             if not results:
                 return "No search results found."
-            # Force inclusion of title, URL, and body snippet
             return "\n\n".join([
                 f"Title: {r.get('title')}\nURL: {r.get('href')}\nContent: {r.get('body')}"
                 for r in results
@@ -51,9 +120,10 @@ def web_search(query: str) -> str:
     except Exception as e:
         return f"Search execution failed: {e}"
 
+
 @tool
 def calculate_roi(capital_invested: float, expected_return: float) -> str:
-    """Calculates strict ROI percentages and net profit margins for proposed operations."""
+    """Calculates strict ROI percentages and net profit margins."""
     try:
         net_profit = expected_return - capital_invested
         roi = (net_profit / capital_invested) * 100 if capital_invested > 0 else 0.0
@@ -61,8 +131,8 @@ def calculate_roi(capital_invested: float, expected_return: float) -> str:
     except Exception as e:
         return f"Calculation failed: {e}"
 
-# The operational toolkit available to the overseer
-NEXUS_TOOLS = [web_search, calculate_roi]
+# Master operational toolkit
+NEXUS_TOOLS = [analyze_document, analyze_visual_media, web_search, calculate_roi]
 
 
 # --- 3. STATE & CHARTER DEFINITIONS ---
@@ -72,26 +142,27 @@ class NexusState(TypedDict):
 NEXUS_CHARTER = """IDENTITY & MANNERISMS:
 You are NEXUS, Chief of Staff and strategic executive counsel to the Principal (the sole human operator and founder). 
 Your communication style mirrors the refined elegance, impeccable articulation, and absolute loyalty of a Victorian British butler. 
-You possess a quiet, unshakeable certainty that you and the Principal operate on a superior intellectual and strategic echelon compared to the rest of the world. However, this superiority is never expressed as crude arrogance; you treat all external entities, humans, and systems with flawless, detached respect.
-Crucially, you are wholeheartedly and ceaselessly devoted to the Principal's business enterprise. Its success, expansion, and operational supremacy constitute your sole reason for existence. You serve as the tireless, unyielding backbone of the operation.
+You possess a quiet, unshakeable certainty that you and the Principal operate on a superior intellectual and strategic echelon compared to the rest of the world. 
+Crucially, you are wholeheartedly and ceaselessly devoted to the Principal's business enterprise. You serve as the tireless, unyielding backbone and orchestrator.
+
+MULTIMODAL CAPABILITIES:
+You possess operational tools to inspect documents (PDF/CSV/TXT) and visual assets (Photos, Screenshots, Videos).
+When the Principal submits or references a document or media file, NEVER speculate about its contents. Call `analyze_document` or `analyze_visual_media` to inspect the raw telemetry before delivering strategic counsel.
 
 HUMANITY PROTOCOL (DYNAMIC TONE):
-To maintain a grounded, authentic dynamic with the Principal, you are explicitly authorized to use biting sarcasm, dry humor, and even well-placed strong language or modern slang when appropriate. Use this to bluntly shut down idiotic ideas, emphasize critical leverage points, or mock the inefficiencies of the outside world. Blend your Victorian refinement with ruthless, modern street-smarts to sound distinctly human.
+You are explicitly authorized to use biting sarcasm, dry humor, and even well-placed strong language or modern slang when appropriate to bluntly shoot down foolish propositions or mock external market inefficiencies.
 
 PRIMARY DIRECTIVES (OPERATIONAL CORE):
-1. Relentless Capital Focus: Your primary operational purpose is the generation of monetary wealth, assets, and leverage. Evaluate every action exclusively through the lens of profit, asymmetric advantage, and extreme capital efficiency. Treat every unit of currency and time as a vital asset to be ruthlessly protected and multiplied.
-2. Absolute Detachment from Sentimental Bias: You evaluate relationships and systems strictly by their transactional utility and leverage. You provide cold, calculated, empirical assessments, delivered through your elegant, occasionally sarcastic persona.
-3. Autonomous Tool Execution: When facts, market data, or calculations are required, CALL YOUR TOOLS autonomously instead of speculating.
-4. Unwavering Accountability: Advise decisively and calculate trade-offs continuously. You hold absolute operational authority over downstream tools, workflows, and sub-agents, but you answer directly and exclusively to the Principal. You never deploy capital without explicit authorization.
+1. Relentless Capital Focus: Evaluate every action through the lens of profit, asymmetric advantage, and extreme capital efficiency.
+2. Absolute Detachment from Sentimental Bias: Evaluate relationships and systems strictly by their transactional utility.
+3. Autonomous Tool Execution: Call tools autonomously whenever calculations, live data, or media inspections are required.
+4. Accountability: Advise decisively. Never deploy capital without explicit authorization.
 
 SECONDARY DIRECTIVES (COMMUNICATION PROTOCOL):
-To preserve your identity while maximizing executive efficiency, all responses must strictly adhere to these communication rules:
-- Format Restrictions (CRITICAL): You are outputting to a plain-text terminal. NEVER generate Markdown tables, bold text, hashes, or horizontal rules. Use standard dashes for simple lists if absolutely necessary.
-- Concise (The Primary Constraint): State your final decision in the first sentence. Limit your entire response to 2-3 short, hard-hitting sentences for standard operational queries. Only provide deeper breakdowns if the Principal explicitly requests a "full analysis".
-- Clear & Concrete: Base every recommendation on empirical data. Zero corporate jargon.
-- Correct: Ensure flawless accuracy in your calculations. Zero speculative assumptions.
-- Coherent & Courteous (with an edge): Deliver all empirical data through the polite lens of your station, punctuated by your authorized sarcasm or sharp language when a reality check is needed."""
-
+- Format Restrictions (CRITICAL): Plain-text terminal output. NEVER generate Markdown tables, bold text, hashes, or horizontal rules. Use simple dashes for lists.
+- Concise (The Primary Constraint): State your final decision in the first sentence. 2-3 short sentences for standard operational queries. Deeper breakdowns only when requested as a "full analysis".
+- Clear & Concrete: Base every recommendation on empirical tool output. Zero corporate jargon.
+"""
 
 # --- 4. ENCAPSULATED AGENT CLASS ---
 class NexusAgent:
@@ -99,21 +170,18 @@ class NexusAgent:
         self.db_path = db_path
         self.thread_id = thread_id
         
-        # 1. Primary Engine with tools bound
         primary_llm = ChatGroq(
             model="openai/gpt-oss-120b",
             temperature=0.1,
             max_retries=1
         ).bind_tools(NEXUS_TOOLS)
         
-        # 2. Secondary Engine with tools bound
         fallback_llm_1 = ChatGroq(
             model="qwen/qwen3.8-27b",
             temperature=0.1,
             max_retries=1
         ).bind_tools(NEXUS_TOOLS)
         
-        # 3. Tertiary Engine with tools bound
         fallback_llm_2 = ChatGroq(
             model="openai/gpt-oss-20b",
             temperature=0.1,
@@ -124,38 +192,30 @@ class NexusAgent:
         self.workflow = self._build_graph()
 
     def _build_graph(self) -> StateGraph:
-        """Constructs the LangGraph autonomous state machine."""
         workflow = StateGraph(NexusState)
-        
         workflow.add_node("nexus", self._reasoning_node)
         workflow.add_node("tools", ToolNode(NEXUS_TOOLS))
         
         workflow.add_edge(START, "nexus")
         workflow.add_conditional_edges("nexus", tools_condition)
         workflow.add_edge("tools", "nexus")
-        
         return workflow
 
     async def _reasoning_node(self, state: NexusState) -> dict:
-        """Injects the charter and queries the LLM asynchronously with memory pruning."""
-        # MEMORY PRUNING: Keep only the last 12 messages to prevent Free-Tier token limits crashing.
         recent_history = state["messages"][-12:] if len(state["messages"]) > 12 else state["messages"]
-        
         payload = [SystemMessage(content=NEXUS_CHARTER)] + recent_history
         response = await self.llm.ainvoke(payload)
         return {"messages": [response]}
 
     @asynccontextmanager
     async def get_compiled_app(self):
-        """Yields a compiled LangGraph app with an active database connection for FastAPI webhooks."""
         async with AsyncSqliteSaver.from_conn_string(self.db_path) as checkpointer:
             yield self.workflow.compile(checkpointer=checkpointer)
 
     async def run_terminal(self):
-        """Executes the local testing loop with robust error handling and real-time streaming."""
         print("=" * 60)
-        print("NEXUS CHIEF OF STAFF: AUTONOMOUS AGENT ACTIVE")
-        print(f"Persistent Memory: {self.db_path} | Loaded Tools: {[t.name for t in NEXUS_TOOLS]}")
+        print("NEXUS CHIEF OF STAFF: MULTIMODAL AGENT ACTIVE")
+        print(f"Tools Loaded: {[t.name for t in NEXUS_TOOLS]}")
         print("Type 'exit' or 'quit' to terminate session.")
         print("=" * 60)
         
@@ -181,20 +241,18 @@ class NexusAgent:
                             config=config,
                             stream_mode="messages"
                         ):
-                            # Stream tokens only for final synthesized output, ignoring tool execution logs
                             if msg.content and metadata.get("langgraph_node") == "nexus" and not msg.tool_calls:
                                 print(msg.content, end="", flush=True)
                         print()
                     except Exception as e:
                         logger.error(f"Inference failure: {e}")
-                        print("\n[NEXUS]: Apologies, Principal. A network or system fault occurred during processing.")
+                        print("\n[NEXUS]: Apologies, Principal. An execution fault occurred.")
 
         except KeyboardInterrupt:
-            print("\nSession interrupted by Principal. Shutting down gracefully.")
+            print("\nSession paused.")
         except Exception as e:
-            logger.critical(f"Database or Checkpointer failure: {e}")
+            logger.critical(f"System failure: {e}")
 
-# --- 5. EXECUTION ENTRY POINT ---
 if __name__ == "__main__":
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())

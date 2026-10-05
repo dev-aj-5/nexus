@@ -6,4 +6,7 @@ python-dotenv
 fastapi
 uvicorn
 python-telegram-bot
-ddgs
+ddgspypdf
+pillow
+langchain-google-genai
+google-genai
