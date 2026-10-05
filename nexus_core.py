@@ -2,6 +2,7 @@ import os
 import sys
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from typing import Annotated, TypedDict
 from dotenv import load_dotenv
 
@@ -101,6 +102,12 @@ class NexusAgent:
         # The .ainvoke() call automatically handles the cascade if a model fails
         response = await self.llm.ainvoke(payload)
         return {"messages": [response]}
+
+    @asynccontextmanager
+    async def get_compiled_app(self):
+        """Yields a compiled LangGraph app with an active database connection for webhooks."""
+        async with AsyncSqliteSaver.from_conn_string(self.db_path) as checkpointer:
+            yield self.workflow.compile(checkpointer=checkpointer)
 
     async def run_terminal(self):
         """Executes the local testing loop with robust error handling."""

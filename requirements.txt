@@ -5,3 +5,4 @@ langgraph-checkpoint-sqlite
 python-dotenv
 fastapi
 uvicorn
+python-telegram-bot
